@@ -46,6 +46,14 @@ struct params
   bool tf_ned_to_nwu         { true };
   bool frame_based_nwu       { false };
 
+  // Orientation/axes convention, overrides the tf_ned_to_* flags above when not empty:
+  //   "rep103"  ENU world, FLU body (x forward, y left, z up). REP-103/REP-145.
+  //   "enu_rfu" ENU world, RFU body (x right, y forward, z up).
+  //   "nwu"     NWU world, FLU body.
+  //   "ned"     raw sensor: NED world, FRD body.
+  std::string frame_convention { "" };
+  bool nwu_world_is_enu      { false };  // set by "rep103": NWU vectors, ENU-world quaternion
+
   bool adjust_ros_timestamp  { true };
   int async_output_rate      { 200 };
   int imu_output_rate        { 200 };

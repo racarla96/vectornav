@@ -92,6 +92,7 @@ void Vectornav::read_parameters()
   declare_parameter<bool>("frame_based_enu", params_.frame_based_enu);
   declare_parameter<bool>("tf_ned_to_nwu", params_.tf_ned_to_nwu);
   declare_parameter<bool>("frame_based_nwu", params_.frame_based_nwu);
+  declare_parameter<std::string>("frame_convention", params_.frame_convention);
   declare_parameter<bool>("adjust_ros_timestamp", params_.adjust_ros_timestamp);
   declare_parameter<int>("async_output_rate", params_.async_output_rate);
   declare_parameter<int>("imu_output_rate", params_.imu_output_rate);
@@ -115,6 +116,26 @@ void Vectornav::read_parameters()
   get_parameter("frame_based_enu", params_.frame_based_enu);
   get_parameter("tf_ned_to_nwu", params_.tf_ned_to_nwu);
   get_parameter("frame_based_nwu", params_.frame_based_nwu);
+  get_parameter("frame_convention", params_.frame_convention);
+  if (!params_.frame_convention.empty()) {
+    const auto & fc = params_.frame_convention;
+    params_.tf_ned_to_enu = params_.tf_ned_to_nwu = false;
+    params_.frame_based_enu = params_.frame_based_nwu = false;
+    params_.nwu_world_is_enu = false;
+    if (fc == "rep103") {
+      // NWU axes handling (FLU body vectors), orientation expressed against an ENU world.
+      params_.tf_ned_to_nwu = true;
+      params_.nwu_world_is_enu = true;
+    } else if (fc == "enu_rfu") {
+      params_.tf_ned_to_enu = true;
+    } else if (fc == "nwu") {
+      params_.tf_ned_to_nwu = true;
+    } else if (fc != "ned") {
+      RCLCPP_FATAL(get_logger(), "frame_convention '%s' unknown (rep103|enu_rfu|nwu|ned)", fc.c_str());
+      throw std::runtime_error("invalid frame_convention");
+    }
+    RCLCPP_INFO(get_logger(), "frame_convention: %s", fc.c_str());
+  }
   get_parameter("adjust_ros_timestamp", params_.adjust_ros_timestamp);
   get_parameter("async_output_rate", params_.async_output_rate);
   get_parameter("imu_output_rate", params_.imu_output_rate);
@@ -726,11 +747,19 @@ bool Vectornav::fill_imu_msg(vn::sensors::CompositeData & cd, sensor_msgs::msg::
           imu_msg.linear_acceleration.y = al[1];
           imu_msg.linear_acceleration.z = al[2];
         } else {
-          // put into NWU
-          quat_msg.x = q[0];
-          quat_msg.y = -q[1];
-          quat_msg.z = -q[2];
-          quat_msg.w = q[3];
+          if (params_.nwu_world_is_enu) {
+            // REP-103: q_flu2enu = q_ned2enu * q_frd2ned * q_flu2frd
+            //   q_ned2enu: pi about (1,1,0) (NED -> ENU world), q_flu2frd: pi about x (FLU -> FRD body)
+            static const tf2::Quaternion q_ned2enu(tf2::Vector3(1, 1, 0).normalized(), M_PI);
+            static const tf2::Quaternion q_flu2frd(tf2::Vector3(1, 0, 0), M_PI);
+            quat_msg = tf2::toMsg(q_ned2enu * tf2_quat * q_flu2frd);
+          } else {
+            // put into NWU
+            quat_msg.x = q[0];
+            quat_msg.y = -q[1];
+            quat_msg.z = -q[2];
+            quat_msg.w = q[3];
+          }
 
           // Invert y and z
           imu_msg.angular_velocity.x = ar[0];
@@ -919,12 +948,19 @@ bool Vectornav::fill_odom_msg(vn::sensors::CompositeData & cd, nav_msgs::msg::Od
       tf2_quat = q_rotate * tf2_quat;
       odom_msg.pose.pose.orientation = tf2::toMsg(tf2_quat);
     } else if (params_.tf_ned_to_nwu && !params_.frame_based_nwu) {
-      // alternative method for conversion to ENU frame (leads to another result)
-      // put into ENU - swap X/Y, invert Z
-      odom_msg.pose.pose.orientation.x = q[0];
-      odom_msg.pose.pose.orientation.y = -q[1];
-      odom_msg.pose.pose.orientation.z = -q[2];
-      odom_msg.pose.pose.orientation.w = q[3];
+      if (params_.nwu_world_is_enu) {
+        // REP-103 (ENU world, FLU body), same as the Imu message
+        static const tf2::Quaternion q_ned2enu(tf2::Vector3(1, 1, 0).normalized(), M_PI);
+        static const tf2::Quaternion q_flu2frd(tf2::Vector3(1, 0, 0), M_PI);
+        odom_msg.pose.pose.orientation =
+          tf2::toMsg(q_ned2enu * tf2::Quaternion(q[0], q[1], q[2], q[3]) * q_flu2frd);
+      } else {
+        // alternative method for conversion to NWU frame
+        odom_msg.pose.pose.orientation.x = q[0];
+        odom_msg.pose.pose.orientation.y = -q[1];
+        odom_msg.pose.pose.orientation.z = -q[2];
+        odom_msg.pose.pose.orientation.w = q[3];
+      }
     }
 
     // Read the estimation uncertainty (1 Sigma) from the sensor and write it to the covariance matrix.
